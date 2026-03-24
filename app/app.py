@@ -4,6 +4,11 @@ from app.db import Post, create_db_and_tables, get_async_session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from contextlib import asynccontextmanager
+from app.images import imagekit, imagekit_public_key, url_endpoint
+import shutil
+import os
+import uuid
+import tempfile
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -18,16 +23,39 @@ async def upload_file(
     caption: str = Form(""),
     session: AsyncSession = Depends(get_async_session)
 ):
-    post = Post(
-        caption=caption,
-        url="dummy_url",
-        file_type="photo",
-        file_name="dummy_file_name"
-    )
-    session.add(post)
-    await session.commit()
-    await session.refresh(post)
-    return post
+    temp_file_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+            temp_file_path = temp_file.name
+            shutil.copyfileobj(file.file, temp_file)
+        
+        upload_result = imagekit.files.upload(
+            file=open(temp_file_path, "rb"),
+            file_name=file.filename,
+            use_unique_file_name=True,
+            tags=["backend_upload"]
+        )
+
+        if upload_result:
+            post = Post(
+                caption=caption,
+                url=upload_result.url,
+                file_type="video" if file.content_type.startswith("video/") else "image",
+                file_name=upload_result.name
+            )
+            session.add(post)
+            await session.commit()
+            await session.refresh(post)
+            return post
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
+        file.file.close()
 
 @app.get("/feed")
 async def get_feed(
@@ -47,4 +75,23 @@ async def get_feed(
             "created_at": post.created_at.isoformat()
         })
     return {"posts": posts_data}
-            
+
+@app.delete("/posts/{post_id}")
+async def delete_post(
+    post_id: str,
+    session: AsyncSession = Depends(get_async_session)
+):
+    try:
+        post_id_uuid = uuid.UUID(post_id)
+        result = await session.execute(select(Post).where(Post.id == post_id_uuid))
+        post = result.scalars().first()
+
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        await session.delete(post)
+        await session.commit()
+
+        return {"success": True, "detail": "Post deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
