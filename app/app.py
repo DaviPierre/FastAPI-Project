@@ -29,6 +29,7 @@ app.include_router(fastapi_users.get_users_router(UserRead, UserUpdate), prefix=
 async def upload_file(
     file: UploadFile = File(...),
     caption: str = Form(""),
+    user: UserRead = Depends(current_active_user),
     session: AsyncSession = Depends(get_async_session)
 ):
     temp_file_path = None
@@ -47,6 +48,7 @@ async def upload_file(
 
         if upload_result:
             post = Post(
+                user_id=user.id,
                 caption=caption,
                 url=upload_result.url,
                 file_type="video" if file.content_type.startswith("video/") else "image",
@@ -67,7 +69,8 @@ async def upload_file(
 
 @app.get("/feed")
 async def get_feed(
-    session: AsyncSession = Depends(get_async_session)
+    session: AsyncSession = Depends(get_async_session),
+    user: UserRead = Depends(current_active_user)
 ):
     result = await session.execute(select(Post).order_by(Post.created_at.desc()))
     posts = [row[0] for row in result.all()]
@@ -76,18 +79,22 @@ async def get_feed(
     for post in posts:
         posts_data.append({
             "id": str(post.id),
+            "user_id": str(post.user_id),
             "caption": post.caption,
             "url": post.url,
             "file_type": post.file_type,
             "file_name": post.file_name,
-            "created_at": post.created_at.isoformat()
+            "created_at": post.created_at.isoformat(),
+            "is_owner": post.user_id == user.id,
+            "email": post.user.email if post.user else None
         })
     return {"posts": posts_data}
 
 @app.delete("/posts/{post_id}")
 async def delete_post(
     post_id: str,
-    session: AsyncSession = Depends(get_async_session)
+    session: AsyncSession = Depends(get_async_session),
+    user: UserRead = Depends(current_active_user)
 ):
     try:
         post_id_uuid = uuid.UUID(post_id)
@@ -96,6 +103,9 @@ async def delete_post(
 
         if not post:
             raise HTTPException(status_code=404, detail="Post not found")
+        
+        if post.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this post")
         
         await session.delete(post)
         await session.commit()
